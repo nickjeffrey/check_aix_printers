@@ -1,0 +1,302 @@
+#!/usr/bin/perl -w
+
+
+
+# CHANGE LOG
+# ----------
+#  2009/12/11	Nick Jeffrey	Script created
+#  2016/05/24 	Nick Jeffrey	Add get_options subroutine
+#  2016/05/24 	Nick Jeffrey	Add check_queued_jobs subroutine
+#  2019/07/12 	Nick Jeffrey	Add verbosity for debugging
+
+
+#
+# Nagios plugin for checking AIX print queue status
+
+# NOTES
+# -----
+#  This script should return one (and only one) line of ouput.  Multiple
+#  lines of output are silently ignored by nagios.
+# 
+#  The line of output will become the body of the alert message sent by nagios
+#
+#  This script is executed remotely on a monitored system by the NRPE or check_by_ssh methods available in nagios.
+#
+#  If you are using the check_by_ssh method, you will need a section in the services.cfg
+#  file on the nagios server that looks similar to the following.
+#  This assumes that you already have ssh key pairs configured.
+#      define service {
+#              use                             generic-8x5-service
+#              hostgroup_name                  all_aix
+#              service_description             AIX print queues
+#              normal_check_interval           15                       ; Check every 15 minutes under normal conditions
+#              check_command                   check_by_ssh!/usr/local/nagios/libexec/check_aix_lpq
+#              }
+#
+#
+#  Alternatively, if you are using the NRPE method, you should have a section similar to the following in 
+#  the services.cfg file:
+#      define service{
+#               use                             generic-8x5-service
+#               hostgroup_name                  all_aix
+#               service_description             AIX print queues
+#               normal_check_interval           15                       ; Check every 15 minutes under normal conditions
+#               check_command                   check_nrpe!check_aix_lpq -t 30
+#               notification_options            c,r                     ; Send notifications about critical and recovery events
+#  If you are using the NRPE method, you will also need a command definition similar to the following on each monitored host
+#  in the /usr/local/nagios/nrpe/nrpe.cfg file:
+#      command[check_aix_lpq]=/usr/local/nagios/libexec/check_aix_lpq
+#
+#
+#
+#
+#
+#
+# TROUBLESHOOTING
+# ---------------
+#   If you have trouble with this nagios check, here are a few hints.
+#     1) Be sure have you sudo installed and configured.  This is the number one source of issues.
+#
+#     2) If you get the following error, it means the /etc/sudoers file is missing a required entry.
+#             Remote command execution failed: Password:
+#
+#     3) Be sure to run this script while logged in as the nagios user (not as root).
+#
+#     4) The lpq command can take several seconds to check each print queue.   
+#        If several print queues exist, this script can take a long time, and possibly timeout.
+#
+#     5) To view a list of all print queues:  /usr/bin/lsallq
+#        To stop  a print queue:   /usr/bin/disable  queuename
+#        To start a print queue:   /usr/bin/enable   queuename
+#
+#     6) By default, this script will check all print queues.  However, if a single queue name is 
+#        provided as a command line parameter, only that queue will be checked.
+#
+#     7) This script executes as the nagios user, but there are a few steps that need to be executed with root privileges.
+#        We handle this by using sudo to execute certain commands, so you will need to ensure that sudo is installed, and
+#        entries similar to the following exist in the /etc/sudoers file:
+#           Cmnd_Alias      QADM = /usr/bin/qadm
+#           NAGIOS_USER ALL = (root) NOPASSWD: QADM
+#
+#
+
+
+ 
+
+use strict;						#enforce good coding practices
+use Getopt::Long;                       		#allow --long-switches to be used as parameters
+
+
+# define variables
+my ($CHECK_NAME,$qadm,$lpq,$lsallq,@printqueues,$printqueue,$status,$queue_ready,$cmd);
+my ($queue_down,@queuesdown,$verbose,$queuenamevalid,$x,$queued_jobs,$queue_dir,$sudo);
+my ($OK,$WARN,$CRITICAL,$UNKNOWN); 
+my ($opt_h,$opt_v);
+	
+
+#define name of nagios check
+$CHECK_NAME="AIX print queues";					#define name of nagios check
+
+
+
+#
+# define variables
+#
+$sudo               = "/usr/bin/sudo";			#location of sudo binary
+$qadm               = "/usr/bin/qadm";			#location of qadm binary
+$lpq                = "/usr/bin/lpq";			#location of lpq binary
+$lsallq             = "/usr/bin/lsallq";		#location of lsallq binary
+$queue_ready        = 0;				#initialize counter
+$queue_down         = 0;				#initialize counter
+$queued_jobs        = 0;				#initialize counter
+$queue_dir          = "/var/spool/lpd/qdir";		#location of print queue directory
+$verbose            = "no";				#debugging flag for verbose output
+$queuenamevalid     = "no";				#flag variable for confirming user provided valid print queue name
+
+#
+# Nagios return codes - this script returns a value to nagios for processing
+#
+$OK=0;
+$WARN=1;
+$CRITICAL=2;
+$UNKNOWN=3;
+
+
+
+
+
+sub get_options {
+   #
+   # this gets the command line parameters provided by the users
+   #
+   print "running get_options subroutine \n" if ($verbose eq "yes");
+   #
+   Getopt::Long::Configure('bundling');
+   GetOptions(
+      "h"   => \$opt_h, "help"        => \$opt_h,
+      "v"   => \$opt_v, "verbose"     => \$opt_v,
+   );
+   #
+   #
+   #
+   # If the user supplied -h or --help, generate the help messages
+   if( defined( $opt_h ) ) {
+      print "Nagios plugin for determining filesystem usage. \n";
+      print "Examples: \n";
+      print "   $0 --help    \n";
+      print "   $0 --verbose \n";
+      print "\n\n";
+      exit $UNKNOWN;
+   }
+   #
+   #
+   # If the user supplied -v or --verbose switch, increase script output verbosity for debugging
+   if( defined( $opt_v ) ) {
+      $verbose = "yes";
+   }
+}                       #end of subroutine
+
+
+
+
+
+sub sanity_checks {
+   #
+   print "running sanity_check subroutine \n" if ($verbose eq "yes");
+   #
+   # confirm required files exist and are executable
+   #
+   $_ = $qadm;
+   if ( ! -e "$_" ) {  print "$CHECK_NAME UNKNOWN required file $_ not found \n"                            ; exit $UNKNOWN; }
+   #if ( ! -x "$_" ) {  print "$CHECK_NAME UNKNOWN required file $_ is not executable by the nagios user \n" ; exit $UNKNOWN; }
+   $_ = $lpq;
+   if ( ! -e "$_" ) {  print "$CHECK_NAME UNKNOWN required file $_ not found \n"                            ; exit $UNKNOWN; }
+   if ( ! -x "$_" ) {  print "$CHECK_NAME UNKNOWN required file $_ is not executable by the nagios user \n" ; exit $UNKNOWN; }
+   $_ = $sudo;
+   if ( ! -e "$_" ) {  print "$CHECK_NAME UNKNOWN required file $_ not found \n"                            ; exit $UNKNOWN; }
+   if ( ! -x "$_" ) {  print "$CHECK_NAME UNKNOWN required file $_ is not executable by the nagios user \n" ; exit $UNKNOWN; }
+}								#end of subroutine
+
+
+
+
+sub check_print_queue_status {
+   #
+   print "running check_print_queue_status subroutine \n" if ($verbose eq "yes");
+   #
+   # check to see if a print queue name was provided as a command line parameter
+   if ($ARGV[0]) {							#a command line parameter was provided
+      print "Using provided print queue name $ARGV[0] \n" if ($verbose eq "yes");#verbose output for debugging
+      #
+      # confirm a valid print queue name was provided
+      @printqueues = `$lsallq`;   		             		#create array containing all print queues 
+      foreach (@printqueues) {						#loop through array of print queues
+         chomp $_;							#remove newline
+         $queuenamevalid = "yes" if ($ARGV[0] eq $_ );			#find a match with the name provided by user
+      }									#end of foreach block
+      unless ( $queuenamevalid eq "yes" ) {				#catch error if user provided invalide queue name
+         print "$CHECK_NAME CRITICAL - there is no print queue called $ARGV[0] \n ";
+         exit $CRITICAL;						#exit script
+      }									#end of unless block
+      @printqueues = $ARGV[0];   		             		#set array to single print queue provided by user
+   } else {								#if no print queue provided, check all queues
+      print "Getting list of print queues \n" if ($verbose eq "yes");	#verbose output for debugging
+      # get a list of all the print queues
+      @printqueues = `$lsallq`;   		             		#create array containing all print queues 
+   }									#end of if/else block
+   #
+   # check each print queue
+   foreach $printqueue (@printqueues) {
+      print "Checking status of $printqueue \n" if ($verbose eq "yes");	#for debugging
+      chomp $printqueue;						#remove newline after name of print queue
+      $cmd = "$lpq -W -P $printqueue";
+      print "   running command $cmd \n" if ($verbose eq "yes");
+      open (IN,"$cmd |");						#open filehandle using command output
+      #
+      # You should expect command output that looks similar to:
+      #  $ lpq -P laser4
+      # Queue   Dev   Status    Job Files              User         PP %   Blks  Cp Rnk
+      # ------- ----- --------- --- ------------------ ---------- ---- -- ----- --- ---
+      # laser4  @nalp READY
+      # laser4:
+      # laser4:
+      # laser4:
+      # laser4:
+      # laser4:
+      #
+      while (<IN>) {    					#read a line from the filehandle
+         next if ( /^Queue/ );					#skip header line
+         next if ( /^\-/ );					#skip header line
+         next if ( /:$/ );					#skip lines where last character is :
+         if ( /READY/ ){					#find print queues that are READY
+            print "$printqueue is READY\n" if ($verbose eq "yes"); #verbose output for debugging
+            $queue_ready++;					#increment counter by 1
+         }							#end of if block
+         if ( /DOWN/ ){						#find print queues that are DOWN
+            print "$printqueue is DOWN\n" if ($verbose eq "yes"); #verbose output for debugging
+            $queue_down++;					#increment counter by 1
+            push (@queuesdown,$printqueue);			#add name of downed print queue to array
+            $x = `$sudo $qadm -U $printqueue`;			#attempt to automatically restart DOWN queues
+         }							#end of if block
+      }								#end of while loop
+      close IN;							#close filehandle
+   }								#end of foreach loop
+}								#end of subroutine
+
+
+
+sub check_queued_jobs {
+   #
+   print "running check_queued_jobs subroutine \n" if ($verbose eq "yes");
+   #
+   # check to see if there are lots of jobs waiting to be printed - may indicate a hung print queue
+   # We look at the number of files in the /var/spool/lpd/qdir folder, which tells us the number of queued print jobs
+   opendir (DIR,$queue_dir) || warn "Cannot open print queue directory: $!";
+   my @files = readdir DIR;					#pull all the filenames into an array
+   foreach (@files) {
+      next if ($_ eq '.');					#skip .  directory entry
+      next if ($_ eq '..');					#skip .. directory entry
+      $queued_jobs++;						#increment counter
+   } 								#end of foreach loop
+   closedir DIR;
+   print "   found $queued_jobs queued print jobs in $queue_dir directory \n" if ($verbose eq "yes");
+}								#end of subroutine
+
+
+
+
+
+
+sub print_output {
+   #
+   # Send  alert if any print queues are down
+   #
+   if ( $queue_down > 0 ) {
+      print "$CHECK_NAME CRITICAL - $queue_ready print queues in READY state.  $queue_down print queues in DOWN state.  Try restarting queue with /usr/bin/enable queuename.  You may also want to do a ping check against each down printer.  Downed queues are: @queuesdown \n";
+      exit $CRITICAL;					#exit script
+   }							#end of if block
+   if ( $queued_jobs > 50 ) {
+      print "$CHECK_NAME WARN - there are $queued_jobs print jobs in the $queue_dir directory.  There may be a hung printer.  $queue_ready print queues in READY state.  $queue_down print queues in DOWN state. \n";
+      exit $WARN;					#exit script
+   }							#end of if block
+   if ( $queue_down == 0 ) {
+      print "$CHECK_NAME OK - $queue_ready print queues in READY state.  $queue_down print queues in DOWN state. $queued_jobs pending jobs in queue. \n";
+      exit $OK;						#exit script
+   }							#end of if block
+   #
+   # we should never get this far
+   #
+   print "$CHECK_NAME UNKNOWN - could not determine state of print queues \n";
+   exit $OK;
+}								#end of subroutine
+
+
+
+
+
+# main body of program
+get_options;
+sanity_checks;
+check_print_queue_status;
+check_queued_jobs;
+print_output;
