@@ -38,3 +38,11 @@ If you are using the NRPE method, you will also need a command definition simila
 ```
     command[check_aix_printers]=/usr/local/nagios/libexec/check_aix_printers
 ```
+
+This script executes as the nagios user, but there are a few steps that need to be executed with root privileges.
+We handle this by using sudo to execute certain commands, so you will need to ensure that sudo is installed, and entries similar to the following exist in the /etc/sudoers file:
+```
+    User_Alias      NAGIOS_USER = nagios
+    Cmnd_Alias      QADM = /usr/bin/qadm
+    NAGIOS_USER ALL = (root) NOPASSWD: QADM
+```
