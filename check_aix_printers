@@ -4,10 +4,11 @@
 
 # CHANGE LOG
 # ----------
-#  2009/12/11	Nick Jeffrey	Script created
-#  2016/05/24 	Nick Jeffrey	Add get_options subroutine
-#  2016/05/24 	Nick Jeffrey	Add check_queued_jobs subroutine
-#  2019/07/12 	Nick Jeffrey	Add verbosity for debugging
+#  2009/12/11	njeffrey	Script created
+#  2016/05/24 	njeffrey	Add get_options subroutine
+#  2016/05/24 	njeffrey	Add check_queued_jobs subroutine
+#  2019/07/12 	njeffrey	Add verbosity for debugging
+#  2021/06/27 	njeffrey	Documentation updates
 
 
 #
@@ -30,7 +31,7 @@
 #              hostgroup_name                  all_aix
 #              service_description             AIX print queues
 #              normal_check_interval           15                       ; Check every 15 minutes under normal conditions
-#              check_command                   check_by_ssh!/usr/local/nagios/libexec/check_aix_lpq
+#              check_command                   check_by_ssh!/usr/local/nagios/libexec/check_aix_printers
 #              }
 #
 #
@@ -41,11 +42,12 @@
 #               hostgroup_name                  all_aix
 #               service_description             AIX print queues
 #               normal_check_interval           15                       ; Check every 15 minutes under normal conditions
-#               check_command                   check_nrpe!check_aix_lpq -t 30
+#               check_command                   check_nrpe!check_aix_printers -t 30
 #               notification_options            c,r                     ; Send notifications about critical and recovery events
+#               }
 #  If you are using the NRPE method, you will also need a command definition similar to the following on each monitored host
 #  in the /usr/local/nagios/nrpe/nrpe.cfg file:
-#      command[check_aix_lpq]=/usr/local/nagios/libexec/check_aix_lpq
+#      command[check_aix_printers]=/usr/local/nagios/libexec/check_aix_printers
 #
 #
 #
@@ -75,6 +77,7 @@
 #     7) This script executes as the nagios user, but there are a few steps that need to be executed with root privileges.
 #        We handle this by using sudo to execute certain commands, so you will need to ensure that sudo is installed, and
 #        entries similar to the following exist in the /etc/sudoers file:
+#           User_Alias      NAGIOS_USER = nagios
 #           Cmnd_Alias      QADM = /usr/bin/qadm
 #           NAGIOS_USER ALL = (root) NOPASSWD: QADM
 #
